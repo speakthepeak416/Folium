@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15 # Uses an Apple Silicon runner with modern Xcode pre-installed
+    runs-on: macos-14 # Uses an Apple Silicon runner with modern Xcode pre-installed
 
     steps:
       - name: Checkout Repository & Submodules
