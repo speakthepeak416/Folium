@@ -1,0 +1,114 @@
+name: Build Folium IPA
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Cytrus/Mandarine targets hardcode ~/VulkanSDK/1.4.363.0/macOS/include
+  VULKAN_SDK_VERSION: "1.4.363.0"
+
+jobs:
+  build:
+    # Folium.xcodeproj is an Xcode 27 project (objectVersion 110), so it needs the Xcode 27 image.
+    runs-on: xcode-27
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Clone any submodules that came through empty
+        run: |
+          # A repo made from "Download ZIP" has .gitmodules but no submodule links,
+          # so Cherry, Cytrus, Mandarine etc. are empty folders. Fill them from .gitmodules.
+          git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read -r key path; do
+            name="${key#submodule.}"; name="${name%.path}"
+            url="$(git config -f .gitmodules --get "submodule.${name}.url")"
+            if [ -z "$(ls -A "$path" 2>/dev/null)" ]; then
+              echo "Cloning $name from $url"
+              rm -rf "$path"
+              git clone --depth 1 "$url" "$path"
+            fi
+          done
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install Vulkan SDK headers
+        run: |
+          VK="$HOME/VulkanSDK/$VULKAN_SDK_VERSION/macOS"
+          if [ ! -f "$VK/include/vulkan/vulkan.h" ]; then
+            ZIP="$RUNNER_TEMP/vulkan-sdk.zip"
+            BASE="https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/mac"
+            curl -fL --retry 3 "$BASE/vulkansdk-macos-$VULKAN_SDK_VERSION.zip" -o "$ZIP" \
+              || curl -fL --retry 3 "$BASE/vulkan-sdk.zip" -o "$ZIP"
+            unzip -q "$ZIP" -d "$RUNNER_TEMP/vulkan-sdk"
+            APP="$(find "$RUNNER_TEMP/vulkan-sdk" -maxdepth 1 -name '*.app' | head -n1)"
+            "$APP/Contents/MacOS/$(ls "$APP/Contents/MacOS" | head -n1)" \
+              --accept-licenses --default-answer --confirm-command install
+          fi
+          ls "$VK/include" || { echo "::error::Vulkan headers not found at $VK/include"; exit 1; }
+
+      - name: Install Boost headers
+        run: |
+          # The project searches /usr/local/include, which Homebrew doesn't use on Apple Silicon.
+          brew install boost
+          sudo mkdir -p /usr/local/include "$HOME/Developer/Repositories"
+          sudo ln -sfn "$(brew --prefix boost)/include/boost" /usr/local/include/boost
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/SourcePackages
+          key: spm-${{ hashFiles('Folium.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild archive \
+            -project Folium.xcodeproj \
+            -scheme Folium \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Folium.xcarchive" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -skipMacroValidation -skipPackagePluginValidation \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Package IPA
+        run: |
+          APP="$(find "$RUNNER_TEMP/Folium.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' | head -n1)"
+          test -d "$APP" || { echo "::error::No .app found in the archive"; exit 1; }
+          rm -rf "$RUNNER_TEMP/ipa" && mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry Folium.ipa Payload)
+          ls -lh "$RUNNER_TEMP/ipa/Folium.ipa"
+          lipo -info "$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Folium-unsigned-ipa
+          path: ${{ runner.temp }}/ipa/Folium.ipa
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
