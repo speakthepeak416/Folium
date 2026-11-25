@@ -1,0 +1,53 @@
+# Build Folium as an unsigned .ipa on a real Mac runner
+# Put this file in your fork at: .github/workflows/build-ipa.yml
+# Then run it from GitHub > Actions > Build Folium IPA > Run workflow
+name: Build Folium IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          xcrun --find codesign || true
+          ls Folium.xcodeproj/xcshareddata/xcschemes/
+
+      - name: Build Folium (unsigned)
+        run: |
+          xcodebuild -project Folium.xcodeproj \
+            -scheme Folium \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM=""
+
+      - name: Package .ipa
+        run: |
+          APP_PATH=$(find DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name "Folium.app" | head -n 1)
+          echo "Found app: $APP_PATH"
+          ls -lh "$APP_PATH"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r Folium-unsigned.ipa Payload
+          ls -lh Folium-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Folium-unsigned-ipa
+          path: Folium-unsigned.ipa
+          if-no-files-found: error
